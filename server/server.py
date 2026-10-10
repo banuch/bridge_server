@@ -1,8 +1,8 @@
 """
 bridge_server.py - TCP server for the QuecPython UART<->TCP bridge.
 
-Run on your PC / VM:   python bridge_server.py
-Needs only Python 3.8+ (standard library).
+Run on your PC / VM:   python server.py
+Needs Python 3.8+ and gurux-dlms (pip install -r requirements.txt).
 
 What it does
  - Listens for modules connecting from the field.
@@ -12,15 +12,18 @@ What it does
        list                       show connected modules
        send <id> <hex bytes>      e.g.  send 1 7EA00A00020023219349E27E
        sendtext <id> <text>       send plain text (\\r \\n escapes allowed)
+       read <id>                  DLMS: connect and read basic meter details
        kick <id>                  disconnect a module
        quit                       stop the server
 
-Replace handle_data() with your own DLMS parsing (e.g. Gurux) when ready.
+Meter addresses / password live in dlms_reader.py.
 """
 import asyncio
 import binascii
 import sys
 import time
+
+import dlms_reader
 
 HOST = "0.0.0.0"
 PORT = 5000                 # must match SERVER_PORT in the module script
@@ -28,6 +31,8 @@ IDLE_TIMEOUT = 600          # seconds without data before dropping a module
 LOG_FILE = "bridge_log.txt"
 
 clients = {}                # id -> (reader, writer, addr)
+sessions = {}               # id -> MeterSession while a DLMS read is running
+tasks = set()               # running read tasks (keeps references alive)
 next_id = 1
 
 
@@ -59,12 +64,19 @@ async def handle_client(reader, writer):
             data = await asyncio.wait_for(reader.read(2048), IDLE_TIMEOUT)
             if not data:
                 break
-            handle_data(cid, addr, data)
+            session = sessions.get(cid)
+            if session:
+                session.feed(data)
+            else:
+                handle_data(cid, addr, data)
     except asyncio.TimeoutError:
         log("Module #{} idle for {}s, dropping".format(cid, IDLE_TIMEOUT))
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
+        session = sessions.get(cid)
+        if session:
+            session.feed(None)          # abort a running read
         clients.pop(cid, None)
         writer.close()
         log("Module #{} disconnected".format(cid))
@@ -82,9 +94,31 @@ async def send_to(cid, payload):
         cid, addr, len(payload), binascii.hexlify(payload, " ").decode().upper()))
 
 
+async def read_meter(cid):
+    entry = clients.get(cid)
+    if not entry:
+        print("No such module:", cid)
+        return
+    if cid in sessions:
+        print("A read is already running on module", cid)
+        return
+    session = dlms_reader.MeterSession(cid, entry[1], log)
+    sessions[cid] = session
+    log("DLMS #{}: reading meter...".format(cid))
+    try:
+        results = await dlms_reader.read_basic(session)
+        log(dlms_reader.format_results(cid, results))
+    except dlms_reader.LinkClosed:
+        log("DLMS #{}: module disconnected during read".format(cid))
+    except Exception as e:
+        log("DLMS #{}: read failed: {!r}".format(cid, e))
+    finally:
+        sessions.pop(cid, None)
+
+
 async def console():
     loop = asyncio.get_running_loop()
-    print("Commands: list | send <id> <hex> | sendtext <id> <text> | kick <id> | quit")
+    print("Commands: list | send <id> <hex> | sendtext <id> <text> | read <id> | kick <id> | quit")
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)
         if not line:
@@ -106,6 +140,10 @@ async def console():
             elif cmd == "sendtext" and len(parts) == 3:
                 text = parts[2].encode().decode("unicode_escape").encode()
                 await send_to(int(parts[1]), text)
+            elif cmd == "read" and len(parts) >= 2:
+                task = asyncio.create_task(read_meter(int(parts[1])))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
             elif cmd == "kick" and len(parts) >= 2:
                 entry = clients.get(int(parts[1]))
                 if entry:

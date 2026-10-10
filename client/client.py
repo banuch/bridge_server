@@ -25,9 +25,14 @@ FRAME_GAP_MS = 50                 # silence that marks the end of a frame
 MAX_CHUNK = 1024
 PROJECT_NAME = "UartTcpBridge"
 PROJECT_VERSION = "1.0.0"
+SIMULATE_METER = False            # True: answer the server from dummy_meter.py instead of the UART
 
 # ---------------- globals -----------------
 uart = UART(UART_PORT, UART_BAUD, 8, 0, 1, 0)
+dummy = None
+if SIMULATE_METER:
+    import dummy_meter
+    dummy = dummy_meter.DummyMeter()
 wdt = WDT(60)
 sock = None
 sock_ok = False                   # set False by either thread on error
@@ -83,6 +88,11 @@ def tcp_to_uart_thread():
             if not data:                      # server closed
                 print("Server closed connection")
                 sock_ok = False
+                continue
+            if dummy:
+                for reply in dummy.feed(data):
+                    s.send(reply)
+                print("S->SIM", len(data), "bytes")
                 continue
             uart.write(data)
             print("S->M", len(data), "bytes")
