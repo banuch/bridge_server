@@ -166,3 +166,4 @@
   [Energy]
     Import active energy     1.0.1.8.0.255    1234567 Wh
     Import apparent energy   1.0.9.8.0.255    1302040 VAh
+[2026-10-15 07:42:55] Server listening on 0.0.0.0:5000 (modules), 0.0.0.0:4059 (PC relay)
